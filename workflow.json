@@ -1,0 +1,482 @@
+{
+  "name": "AI Customer Support Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "support",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000001",
+      "name": "Support Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "support-webhook-id"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst body = item.json.body || item.json;\n\nconst ticket = {\n  customerId: body.customer_id || body.email || 'anonymous',\n  customerName: body.name || 'Customer',\n  email: body.email || '',\n  channel: body.channel || 'web',\n  subject: body.subject || '(no subject)',\n  message: body.message || '',\n  language: body.language || 'en',\n  previousTickets: body.previous_tickets || 0,\n  accountTier: body.account_tier || 'free',\n  timestamp: new Date().toISOString(),\n  ticketId: 'TKT-' + Date.now().toString(36).toUpperCase()\n};\n\nreturn [{ json: ticket }];"
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000002",
+      "name": "Parse Ticket",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.KNOWLEDGE_BASE_URL || 'https://api.example.com/kb/search' }}",
+        "method": "POST",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $json.subject + ' ' + $json.message }}"
+            },
+            {
+              "name": "limit",
+              "value": "3"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000003",
+      "name": "Search Knowledge Base",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        200
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.ORDER_API_URL || 'https://api.example.com/orders' }}",
+        "method": "GET",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "customer_id",
+              "value": "={{ $('Parse Ticket').item.json.customerId }}"
+            },
+            {
+              "name": "limit",
+              "value": "3"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000004",
+      "name": "Fetch Order History",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        400
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const ticket = $('Parse Ticket').first().json;\nconst kbResults = $('Search Knowledge Base').first().json;\nconst orders = $('Fetch Order History').first().json;\n\nlet kbContext = 'No relevant articles found.';\nif (kbResults && kbResults.results && kbResults.results.length > 0) {\n  kbContext = kbResults.results.map((r, i) => \n    `Article ${i+1}: ${r.title}\\n${r.content || r.snippet || r.summary}`\n  ).join('\\n\\n');\n}\n\nlet orderContext = 'No order history available.';\nif (orders && orders.orders && orders.orders.length > 0) {\n  orderContext = orders.orders.map(o => \n    `Order ${o.id}: ${o.status} - ${o.items?.map(i => i.name).join(', ') || 'N/A'} ($${o.total || 'N/A'}) - ${o.date || 'N/A'}`\n  ).join('\\n');\n}\n\nreturn [{\n  json: {\n    ...ticket,\n    kbContext,\n    orderContext\n  }\n}];"
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000005",
+      "name": "Merge Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "model": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "You are a professional, empathetic customer support agent. Your job is to help customers with their issues using the context provided.\n\nRules:\n1. Be warm, professional, and concise\n2. If the knowledge base has a relevant answer, use it\n3. If you can see order history, reference specific orders when relevant\n4. If you cannot resolve the issue, escalate it clearly\n5. Never make up information about orders, policies, or features\n6. For billing/refund requests, always escalate to a human agent\n7. For account security issues, always escalate immediately\n8. Match the customer's language if not English\n\nReturn a JSON object with:\n- \"category\": one of \"billing\", \"technical\", \"account\", \"shipping\", \"product\", \"feedback\", \"general\"\n- \"priority\": \"critical\", \"high\", \"medium\", or \"low\"\n- \"sentiment\": \"positive\", \"neutral\", \"negative\", or \"angry\"\n- \"can_resolve\": true if you can fully resolve this, false if human needed\n- \"response\": your complete reply to the customer (HTML formatted)\n- \"internal_notes\": brief notes for the support team\n- \"suggested_tags\": array of 2-4 tags for this ticket\n- \"escalate_to\": null or one of \"billing_team\", \"technical_team\", \"account_security\", \"management\"\n- \"follow_up_needed\": true/false\n- \"confidence\": 0.0 to 1.0\n\nReturn ONLY valid JSON.",
+              "role": "system"
+            },
+            {
+              "content": "=CUSTOMER: {{ $json.customerName }} ({{ $json.email }})\nACCOUNT TIER: {{ $json.accountTier }}\nCHANNEL: {{ $json.channel }}\nPREVIOUS TICKETS: {{ $json.previousTickets }}\n\nSUBJECT: {{ $json.subject }}\nMESSAGE: {{ $json.message }}\n\nKNOWLEDGE BASE CONTEXT:\n{{ $json.kbContext }}\n\nORDER HISTORY:\n{{ $json.orderContext }}",
+              "role": "user"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.3,
+          "maxTokens": 1500,
+          "responseFormat": "json_object"
+        }
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000006",
+      "name": "AI Support Agent",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        880,
+        300
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "openai_credential_id",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const ticket = $('Merge Context').first().json;\nlet aiResponse;\n\ntry {\n  const raw = $input.first().json;\n  const content = raw.message?.content || raw.choices?.[0]?.message?.content || JSON.stringify(raw);\n  aiResponse = typeof content === 'string' ? JSON.parse(content) : content;\n} catch (e) {\n  aiResponse = {\n    category: 'general',\n    priority: 'medium',\n    sentiment: 'neutral',\n    can_resolve: false,\n    response: '<p>Thank you for reaching out. Your ticket has been received and a team member will get back to you shortly.</p>',\n    internal_notes: 'AI classification failed - needs manual review',\n    suggested_tags: ['needs-review'],\n    escalate_to: null,\n    follow_up_needed: true,\n    confidence: 0.0\n  };\n}\n\nreturn [{\n  json: {\n    ticketId: ticket.ticketId,\n    customerId: ticket.customerId,\n    customerName: ticket.customerName,\n    email: ticket.email,\n    channel: ticket.channel,\n    subject: ticket.subject,\n    originalMessage: ticket.message,\n    accountTier: ticket.accountTier,\n    timestamp: ticket.timestamp,\n    category: aiResponse.category,\n    priority: aiResponse.priority,\n    sentiment: aiResponse.sentiment,\n    canResolve: aiResponse.can_resolve,\n    response: aiResponse.response,\n    internalNotes: aiResponse.internal_notes,\n    suggestedTags: aiResponse.suggested_tags || [],\n    escalateTo: aiResponse.escalate_to,\n    followUpNeeded: aiResponse.follow_up_needed,\n    confidence: aiResponse.confidence,\n    resolvedAt: aiResponse.can_resolve ? new Date().toISOString() : null\n  }\n}];"
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000007",
+      "name": "Process AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.GOOGLE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Support Tickets",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Ticket ID": "={{ $json.ticketId }}",
+            "Date": "={{ $json.timestamp }}",
+            "Customer": "={{ $json.customerName }}",
+            "Email": "={{ $json.email }}",
+            "Channel": "={{ $json.channel }}",
+            "Subject": "={{ $json.subject }}",
+            "Category": "={{ $json.category }}",
+            "Priority": "={{ $json.priority }}",
+            "Sentiment": "={{ $json.sentiment }}",
+            "Resolved by AI": "={{ $json.canResolve }}",
+            "Escalated To": "={{ $json.escalateTo || 'N/A' }}",
+            "Confidence": "={{ $json.confidence }}",
+            "Tags": "={{ $json.suggestedTags.join(', ') }}"
+          }
+        }
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000008",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1320,
+        100
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gsheets_id",
+          "name": "Google Sheets"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.canResolve }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000009",
+      "name": "Can AI Resolve?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.SMTP_FROM || 'support@company.com' }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "=Re: {{ $json.subject }} [{{ $json.ticketId }}]",
+        "emailType": "html",
+        "html": "=<div style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #333;\"><div style=\"background: #4F46E5; color: white; padding: 16px 24px; border-radius: 8px 8px 0 0;\"><h2 style=\"margin: 0; font-size: 18px;\">Support Ticket {{ $json.ticketId }}</h2></div><div style=\"padding: 24px; background: #f9fafb; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;\"><p>Hi {{ $json.customerName }},</p>{{ $json.response }}<hr style=\"border: none; border-top: 1px solid #e0e0e0; margin: 24px 0;\"><p style=\"font-size: 13px; color: #6b7280;\">Ticket ID: {{ $json.ticketId }}<br>If you need further help, reply to this email.</p></div></div>"
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000010",
+      "name": "Send Customer Reply",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1540,
+        300
+      ],
+      "credentials": {
+        "smtp": {
+          "id": "smtp_id",
+          "name": "SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "={{ $env.SLACK_CHANNEL || '#support-resolved' }}",
+        "text": "",
+        "blocksUi": "={\"blocks\":[{\"type\":\"header\",\"text\":{\"type\":\"plain_text\",\"text\":\"AI Resolved: {{ $json.ticketId }}\"}},{\"type\":\"section\",\"fields\":[{\"type\":\"mrkdwn\",\"text\":\"*Customer:*\\n{{ $json.customerName }}\"},{\"type\":\"mrkdwn\",\"text\":\"*Category:*\\n{{ $json.category }} ({{ $json.priority }})\"}]},{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"*Subject:* {{ $json.subject }}\\n*Notes:* {{ $json.internalNotes }}\"}},{\"type\":\"context\",\"elements\":[{\"type\":\"mrkdwn\",\"text\":\"Confidence: {{ $json.confidence }} | Sentiment: {{ $json.sentiment }}\"}]}]}"
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000011",
+      "name": "Slack Resolved Log",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1760,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "slack_id",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "={{ $json.escalateTo === 'billing_team' ? '#billing-support' : $json.escalateTo === 'technical_team' ? '#tech-support' : $json.escalateTo === 'account_security' ? '#security-urgent' : '#support-escalations' }}",
+        "text": "",
+        "blocksUi": "={\"blocks\":[{\"type\":\"header\",\"text\":{\"type\":\"plain_text\",\"text\":\"Escalation: {{ $json.ticketId }}\"}},{\"type\":\"section\",\"fields\":[{\"type\":\"mrkdwn\",\"text\":\"*Customer:*\\n{{ $json.customerName }} ({{ $json.email }})\"},{\"type\":\"mrkdwn\",\"text\":\"*Priority:*\\n{{ $json.priority }} | *Tier:* {{ $json.accountTier }}\"}]},{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"*Subject:* {{ $json.subject }}\\n*Message:*\\n>>> {{ $json.originalMessage }}\"}},{\"type\":\"divider\"},{\"type\":\"section\",\"text\":{\"type\":\"mrkdwn\",\"text\":\"*AI Draft Response:*\\n{{ $json.response }}\\n\\n*Internal Notes:* {{ $json.internalNotes }}\"}},{\"type\":\"context\",\"elements\":[{\"type\":\"mrkdwn\",\"text\":\"Escalate to: {{ $json.escalateTo || 'general' }} | Sentiment: {{ $json.sentiment }} | Confidence: {{ $json.confidence }}\"}]}]}"
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000012",
+      "name": "Slack Escalate to Human",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        600
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "slack_id",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"success\":true,\"ticket_id\":\"{{ $json.ticketId }}\",\"category\":\"{{ $json.category }}\",\"priority\":\"{{ $json.priority }}\",\"resolved_by_ai\":{{ $json.canResolve }},\"response\":\"{{ $json.response }}\",\"escalated_to\":{{ $json.escalateTo ? '\"' + $json.escalateTo + '\"' : 'null' }}}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "b2c3d4e5-2001-4000-8000-000000000013",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1760,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "Support Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Ticket": {
+      "main": [
+        [
+          {
+            "node": "Search Knowledge Base",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Order History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Knowledge Base": {
+      "main": [
+        [
+          {
+            "node": "Merge Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Order History": {
+      "main": [
+        [
+          {
+            "node": "Merge Context",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Context": {
+      "main": [
+        [
+          {
+            "node": "AI Support Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Support Agent": {
+      "main": [
+        [
+          {
+            "node": "Process AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process AI Response": {
+      "main": [
+        [
+          {
+            "node": "Log to Google Sheets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Can AI Resolve?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Can AI Resolve?": {
+      "main": [
+        [
+          {
+            "node": "Send Customer Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack Escalate to Human",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Customer Reply": {
+      "main": [
+        [
+          {
+            "node": "Slack Resolved Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack Resolved Log": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack Escalate to Human": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "customer-support"
+    },
+    {
+      "name": "ai"
+    },
+    {
+      "name": "chatbot"
+    },
+    {
+      "name": "automation"
+    },
+    {
+      "name": "gpt-4o"
+    }
+  ],
+  "triggerCount": 1,
+  "pinData": {}
+}
